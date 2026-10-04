@@ -1,26 +1,15 @@
 {
-  "name": "free-learning-platform",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "padhahai",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/kritesh-sketch/PadhaHai-Where-Everyone-Can-Learn.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/kritesh-sketch/PadhaHai-Where-Everyone-Can-Learn/issues"
-  },
-  "homepage": "https://github.com/kritesh-sketch/PadhaHai-Where-Everyone-Can-Learn#readme",
-  "dependencies": {
-    "cors": "^2.8.6",
-    "dotenv": "^18.0.5",
-    "express": "^5.2.1"
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0"
   }
 }
