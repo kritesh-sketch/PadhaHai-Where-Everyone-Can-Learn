@@ -17,7 +17,7 @@ const [
 ] = await Promise.all([
   import("../src/app.js"),
   import("../src/config/config.js"),
-  import("../src/modules/auth/user.model.js"),
+  import("../src/modules/users/user.model.js"),
   import("../src/modules/auth/session.model.js"),
   import("../src/modules/courses/course.model.js"),
   import("../src/modules/categories/category.model.js"),
@@ -65,9 +65,7 @@ function chain(value) {
 function installModelStubs() {
   userModel.findById = async (userId) => users.get(id(userId)) ?? null;
   userModel.find = () =>
-    chain(
-      [...users.values()].map(({ password: _password, ...user }) => user),
-    );
+    chain([...users.values()].map(({ password: _password, ...user }) => user));
   userModel.findByIdAndUpdate = (userId, update) => {
     const user = users.get(id(userId));
     if (user) {
@@ -108,7 +106,9 @@ function installModelStubs() {
   courseModel.find = (query) =>
     chain([...courses.values()].filter((course) => matches(course, query)));
   courseModel.findOne = (query) =>
-    chain([...courses.values()].find((course) => matches(course, query)) ?? null);
+    chain(
+      [...courses.values()].find((course) => matches(course, query)) ?? null,
+    );
   courseModel.findOneAndUpdate = async (query, update) => {
     const course = [...courses.values()].find((item) => matches(item, query));
     if (course) {
@@ -309,7 +309,10 @@ test("role-specific route matrix enforces authentication before authorization", 
     const result = await request("/api/instructor/courses", {
       method: "POST",
       token: principal.token,
-      body: { title: "A useful course", description: "A sufficiently long course description." },
+      body: {
+        title: "A useful course",
+        description: "A sufficiently long course description.",
+      },
     });
     assert.equal(
       result.response.status,
@@ -336,9 +339,11 @@ test("role-specific route matrix enforces authentication before authorization", 
   const forgedAdminClaim = jwt.sign(
     {
       sub: id(student.user),
-      sessionId: id([...sessions.values()].find(
-        (session) => id(session.user) === id(student.user),
-      )),
+      sessionId: id(
+        [...sessions.values()].find(
+          (session) => id(session.user) === id(student.user),
+        ),
+      ),
       role: "ADMIN",
       tokenType: "access",
     },
@@ -357,7 +362,10 @@ test("students can only browse published courses and cannot call instructor APIs
   const draft = await request("/api/instructor/courses", {
     method: "POST",
     token: instructor.token,
-    body: { title: "Draft course", description: "A sufficiently long course description." },
+    body: {
+      title: "Draft course",
+      description: "A sufficiently long course description.",
+    },
   });
   assert.equal(draft.response.status, 201);
   assert.equal(draft.body.course.status, "DRAFT");
@@ -371,7 +379,10 @@ test("students can only browse published courses and cannot call instructor APIs
   const blockedCreate = await request("/api/instructor/courses", {
     method: "POST",
     token: student.token,
-    body: { title: "Forbidden course", description: "A sufficiently long course description." },
+    body: {
+      title: "Forbidden course",
+      description: "A sufficiently long course description.",
+    },
   });
   assert.equal(blockedCreate.response.status, 403);
 

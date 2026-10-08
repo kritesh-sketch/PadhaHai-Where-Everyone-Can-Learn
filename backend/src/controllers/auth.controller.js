@@ -1,14 +1,10 @@
-import {
-  createHash,
-  randomUUID,
-  timingSafeEqual,
-} from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import config from "../config/config.js";
 import sessionModel from "../modules/auth/session.model.js";
-import userModel from "../modules/auth/user.model.js";
+import userModel from "../modules/users/user.model.js";
 
 const ACCESS_TOKEN_LIFETIME = "15m";
 const REFRESH_TOKEN_LIFETIME = "7d";
@@ -174,10 +170,7 @@ export async function login(req, res, next) {
       .findOne(isEmail ? { email: identifier } : { username: identifier })
       .select("+password");
 
-    if (
-      !user ||
-      !(await verifyPasswordAndUpgrade(user, req.body.password))
-    ) {
+    if (!user || !(await verifyPasswordAndUpgrade(user, req.body.password))) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
@@ -314,7 +307,9 @@ export async function listUsers(_req, res, next) {
   try {
     const users = await userModel
       .find()
-      .select("firstName lastName username email role isActive createdAt updatedAt")
+      .select(
+        "firstName lastName username email role isActive createdAt updatedAt",
+      )
       .limit(100)
       .lean();
     return res.json({ users });

@@ -1,4 +1,4 @@
-import { USER_ROLES } from "../modules/auth/user.model.js";
+import { USER_ROLES } from "../modules/users/user.model.js";
 
 export function authorizeRoles(...allowedRoles) {
   if (
@@ -14,7 +14,9 @@ export function authorizeRoles(...allowedRoles) {
     }
 
     if (!USER_ROLES.includes(req.user.role)) {
-      return res.status(403).json({ message: "User role is missing or invalid" });
+      return res
+        .status(403)
+        .json({ message: "User role is missing or invalid" });
     }
 
     if (!allowedRoles.includes(req.user.role)) {

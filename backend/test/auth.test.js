@@ -8,14 +8,19 @@ import mongoose from "mongoose";
 process.env.JWT_SECRET = "auth-test-secret-that-is-not-used-outside-tests";
 process.env.MONGODB_URL = "mongodb://127.0.0.1/auth-tests";
 
-const [{ default: app }, { default: config }, { default: userModel }, { default: sessionModel }, { authorizeRoles }] =
-  await Promise.all([
-    import("../src/app.js"),
-    import("../src/config/config.js"),
-    import("../src/modules/auth/user.model.js"),
-    import("../src/modules/auth/session.model.js"),
-    import("../src/middleware/role.middleware.js"),
-  ]);
+const [
+  { default: app },
+  { default: config },
+  { default: userModel },
+  { default: sessionModel },
+  { authorizeRoles },
+] = await Promise.all([
+  import("../src/app.js"),
+  import("../src/config/config.js"),
+  import("../src/modules/users/user.model.js"),
+  import("../src/modules/auth/session.model.js"),
+  import("../src/middleware/role.middleware.js"),
+]);
 
 const users = new Map();
 const sessions = new Map();
@@ -218,7 +223,9 @@ test("registration validates required fields and password rules", async () => {
 
   const shortPassword = await register("", { password: "short" });
   assert.equal(shortPassword.response.status, 400);
-  assert.ok(shortPassword.body.errors.some(({ field }) => field === "password"));
+  assert.ok(
+    shortPassword.body.errors.some(({ field }) => field === "password"),
+  );
 
   const invalidEmail = await register("", { email: "not-an-email" });
   assert.equal(invalidEmail.response.status, 400);
@@ -398,9 +405,7 @@ test("expired refresh tokens are rejected and their sessions are revoked", async
     config.JWT_SECRET,
     { expiresIn: -1, algorithm: "HS256" },
   );
-  const refreshHash = createHash("sha256")
-    .update(expiredRefresh)
-    .digest("hex");
+  const refreshHash = createHash("sha256").update(expiredRefresh).digest("hex");
   const session = await sessionModel.create({
     user: user._id,
     refreshTokenHash: refreshHash,
@@ -421,25 +426,17 @@ test("expired refresh tokens are rejected and their sessions are revoked", async
 test("role middleware authorizes matching and multiple roles and denies other roles", async () => {
   for (const role of ["STUDENT", "INSTRUCTOR", "ADMIN"]) {
     let continued = false;
-    authorizeRoles(role)(
-      { user: { role } },
-      {},
-      () => {
-        continued = true;
-      },
-    );
+    authorizeRoles(role)({ user: { role } }, {}, () => {
+      continued = true;
+    });
     assert.equal(continued, true);
   }
 
   for (const role of ["ADMIN", "INSTRUCTOR"]) {
     let continued = false;
-    authorizeRoles("ADMIN", "INSTRUCTOR")(
-      { user: { role } },
-      {},
-      () => {
-        continued = true;
-      },
-    );
+    authorizeRoles("ADMIN", "INSTRUCTOR")({ user: { role } }, {}, () => {
+      continued = true;
+    });
     assert.equal(continued, true);
   }
 

@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import courseModel from "../courses/course.model.js";
 import sessionModel from "../auth/session.model.js";
-import userModel, { USER_ROLES } from "../auth/user.model.js";
+import userModel, { USER_ROLES } from "../users/user.model.js";
 import categoryModel from "../categories/category.model.js";
 import lessonModel from "../lessons/lesson.model.js";
 

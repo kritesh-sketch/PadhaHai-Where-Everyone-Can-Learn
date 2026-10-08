@@ -2,7 +2,7 @@ import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import config from "../../config/config.js";
 import sessionModel from "../auth/session.model.js";
-import userModel from "../auth/user.model.js";
+import userModel from "../users/user.model.js";
 
 async function authenticate(req, res, next) {
   const authorization = req.get("authorization");
