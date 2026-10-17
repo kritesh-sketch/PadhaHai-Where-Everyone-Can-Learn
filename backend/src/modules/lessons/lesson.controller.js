@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import courseModel from "../courses/course.model.js";
+import enrollmentModel from "../enrollments/enrollment.model.js";
 import lessonModel, { LESSON_STATUSES } from "./lesson.model.js";
 
 function parseLessonInput(body, partial = false) {
@@ -165,6 +166,10 @@ export async function deleteLesson(req, res, next) {
     if (!lesson) {
       return res.status(404).json({ message: "Lesson not found" });
     }
+    await enrollmentModel.updateMany(
+      { lastAccessedLesson: lesson._id },
+      { $set: { lastAccessedLesson: null, lastAccessedAt: null } },
+    );
     return res.status(204).end();
   } catch (error) {
     return next(error);
@@ -178,10 +183,18 @@ export async function listPublishedLessons(req, res, next) {
   try {
     const course = await courseModel
       .findOne({ _id: req.params.courseId, status: "PUBLISHED" })
-      .select("_id")
+      .select("_id visibility")
       .lean();
-    if (!course) {
+    if (!course || course.visibility === "PRIVATE") {
       return res.status(404).json({ message: "Course not found" });
+    }
+    const hasAccess = await enrollmentModel.exists({
+      learner: req.user._id,
+      course: req.params.courseId,
+      status: { $in: ["ACTIVE", "COMPLETED"] },
+    });
+    if (!hasAccess) {
+      return res.status(403).json({ message: "An active enrollment is required" });
     }
     const lessons = await lessonModel
       .find({ course: req.params.courseId, status: "PUBLISHED" })

@@ -1,8 +1,8 @@
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import config from "../../config/config.js";
-import sessionModel from "../auth/session.model.js";
-import userModel from "../users/user.model.js";
+import sessionModel from "../../modules/auth/session.model.js";
+import userModel from "../../modules/users/user.model.js";
 
 async function authenticate(req, res, next) {
   const authorization = req.get("authorization");
@@ -52,7 +52,11 @@ async function authenticate(req, res, next) {
     }
 
     const user = await userModel.findById(payload.sub);
-    if (!user || !user.isActive) {
+    if (
+      !user ||
+      user.isActive === false ||
+      (user.status !== undefined && user.status !== "ACTIVE")
+    ) {
       return res.status(401).json({ message: "User account is unavailable" });
     }
 

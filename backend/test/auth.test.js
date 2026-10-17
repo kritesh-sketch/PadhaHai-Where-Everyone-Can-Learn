@@ -240,7 +240,7 @@ test("student registration normalizes identity fields and stores a password hash
   });
 
   assert.equal(response.status, 201);
-  assert.equal(body.user.role, "STUDENT");
+  assert.equal(body.user.role, "LEARNER");
   assert.equal(body.user.username, "test_learner");
   assert.equal(body.user.email, "test@example.com");
   assert.equal(body.user.isActive, true);
@@ -305,7 +305,7 @@ test("legacy SHA-256 passwords are upgraded after a successful login", async () 
     username: "legacy_account",
     email: "legacy@example.com",
     password: legacyHash,
-    role: "STUDENT",
+    role: "LEARNER",
     isActive: true,
   });
 
@@ -399,7 +399,7 @@ test("refresh tokens rotate and logout invalidates the access session", async ()
 });
 
 test("expired refresh tokens are rejected and their sessions are revoked", async () => {
-  const { user } = await createAuthorizedUser("STUDENT");
+  const { user } = await createAuthorizedUser("LEARNER");
   const expiredRefresh = jwt.sign(
     { sub: user._id.toString(), tokenType: "refresh" },
     config.JWT_SECRET,
@@ -424,7 +424,7 @@ test("expired refresh tokens are rejected and their sessions are revoked", async
 });
 
 test("role middleware authorizes matching and multiple roles and denies other roles", async () => {
-  for (const role of ["STUDENT", "INSTRUCTOR", "ADMIN"]) {
+  for (const role of ["LEARNER", "INSTRUCTOR", "ADMIN"]) {
     let continued = false;
     authorizeRoles(role)({ user: { role } }, {}, () => {
       continued = true;
@@ -442,7 +442,7 @@ test("role middleware authorizes matching and multiple roles and denies other ro
 
   let deniedStatus;
   authorizeRoles("ADMIN")(
-    { user: { role: "STUDENT" } },
+    { user: { role: "LEARNER" } },
     {
       status(code) {
         deniedStatus = code;
@@ -486,7 +486,7 @@ test("role middleware authorizes matching and multiple roles and denies other ro
 });
 
 test("admin-only user listing rejects students and instructors", async () => {
-  for (const role of ["STUDENT", "INSTRUCTOR"]) {
+  for (const role of ["LEARNER", "INSTRUCTOR"]) {
     const { accessToken } = await createAuthorizedUser(role);
     const result = await request("/api/admin/users", { token: accessToken });
     assert.equal(result.response.status, 403);

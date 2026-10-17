@@ -1,12 +1,14 @@
 import { Router } from "express";
-import authenticate from "../modules/middleware/auth.middleware.js";
+import authenticate from "../middleware/auth.middleware.js";
 import { authorizeRoles } from "../middleware/role.middleware.js";
 import {
   createCourse,
   deleteInstructorCourse,
   listInstructorCourses,
   updateInstructorCourse,
+  updateInstructorCourseStatus,
 } from "../modules/courses/course.controller.js";
+import { getCourseEnrollments } from "../modules/enrollments/enrollment.controller.js";
 import {
   createLesson,
   deleteLesson,
@@ -20,7 +22,12 @@ instructorRouter.use(authenticate, authorizeRoles("INSTRUCTOR"));
 instructorRouter.get("/courses", listInstructorCourses);
 instructorRouter.post("/courses", createCourse);
 instructorRouter.patch("/courses/:courseId", updateInstructorCourse);
+instructorRouter.patch("/courses/:courseId/status", updateInstructorCourseStatus);
 instructorRouter.delete("/courses/:courseId", deleteInstructorCourse);
+instructorRouter.get(
+  "/courses/:courseId/enrollments",
+  getCourseEnrollments,
+);
 instructorRouter.get("/courses/:courseId/lessons", listInstructorLessons);
 instructorRouter.post("/courses/:courseId/lessons", createLesson);
 instructorRouter.patch(
