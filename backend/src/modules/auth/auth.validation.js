@@ -121,6 +121,10 @@ function validateLogin(req, res, next) {
     errors.push({ field: "password", message: "Password is required" });
   }
 
+  if (body.rememberMe !== undefined && typeof body.rememberMe !== "boolean") {
+    errors.push({ field: "rememberMe", message: "Must be a boolean" });
+  }
+
   // Reject the request if any required login fields are invalid.
   if (errors.length > 0) {
     return res.status(400).json({
@@ -133,4 +137,38 @@ function validateLogin(req, res, next) {
   return next();
 }
 
-export { validateLogin, validateRegistration };
+function validateEmailRequest(req, res, next) {
+  const email = req.body?.email;
+  if (
+    !isNonEmptyString(email) ||
+    email.trim().length > 254 ||
+    !EMAIL_PATTERN.test(email.trim())
+  ) {
+    return res.status(400).json({
+      message: "Validation failed",
+      errors: [{ field: "email", message: "Must be a valid email address" }],
+    });
+  }
+  return next();
+}
+
+function validateVerificationToken(req, res, next) {
+  const token = req.body?.token;
+  if (
+    typeof token !== "string" ||
+    !/^[a-f0-9]{64}$/i.test(token)
+  ) {
+    return res.status(400).json({
+      message: "Validation failed",
+      errors: [{ field: "token", message: "Must be a valid verification token" }],
+    });
+  }
+  return next();
+}
+
+export {
+  validateEmailRequest,
+  validateLogin,
+  validateRegistration,
+  validateVerificationToken,
+};

@@ -21,6 +21,138 @@ function requireLearner(user) {
   }
 }
 
+function buildLearningProgressSummaryPipeline(learnerId) {
+  return [
+    {
+      $match: {
+        learner: learnerId,
+        status: { $in: ["ACTIVE", "COMPLETED"] },
+      },
+    },
+    {
+      $lookup: {
+        from: courseModel.collection.name,
+        localField: "course",
+        foreignField: "_id",
+        pipeline: [{ $match: { status: "PUBLISHED" } }],
+        as: "course",
+      },
+    },
+    { $unwind: "$course" },
+    {
+      $lookup: {
+        from: lessonModel.collection.name,
+        let: { courseId: "$course._id" },
+        pipeline: [
+          {
+            $match: {
+              $expr: { $eq: ["$course", "$$courseId"] },
+              status: "PUBLISHED",
+            },
+          },
+          { $count: "count" },
+        ],
+        as: "lessonCounts",
+      },
+    },
+    {
+      $lookup: {
+        from: progressModel.collection.name,
+        let: { courseId: "$course._id" },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ["$learner", learnerId] },
+                  { $eq: ["$course", "$$courseId"] },
+                ],
+              },
+            },
+          },
+          {
+            $lookup: {
+              from: lessonModel.collection.name,
+              let: { lessonId: "$lesson", courseId: "$course" },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ["$_id", "$$lessonId"] },
+                        { $eq: ["$course", "$$courseId"] },
+                        { $eq: ["$status", "PUBLISHED"] },
+                      ],
+                    },
+                  },
+                },
+                { $project: { _id: 1 } },
+              ],
+              as: "publishedLesson",
+            },
+          },
+          { $match: { "publishedLesson.0": { $exists: true } } },
+          { $count: "count" },
+        ],
+        as: "completedCounts",
+      },
+    },
+    {
+      $addFields: {
+        totalLessons: {
+          $ifNull: [{ $arrayElemAt: ["$lessonCounts.count", 0] }, 0],
+        },
+        completedLessons: {
+          $ifNull: [{ $arrayElemAt: ["$completedCounts.count", 0] }, 0],
+        },
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        activeCourses: {
+          $sum: { $cond: [{ $eq: ["$status", "ACTIVE"] }, 1, 0] },
+        },
+        completedCourses: {
+          $sum: { $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0] },
+        },
+        totalLessons: { $sum: "$totalLessons" },
+        completedLessons: { $sum: "$completedLessons" },
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        activeCourses: 1,
+        completedCourses: 1,
+        totalLessons: 1,
+        completedLessons: 1,
+      },
+    },
+  ];
+}
+
+export async function getLearningProgressSummary(user) {
+  requireLearner(user);
+
+  const [summary] = await enrollmentModel.aggregate(
+    buildLearningProgressSummaryPipeline(user._id),
+  );
+  const totalLessons = summary?.totalLessons ?? 0;
+  const completedLessons = summary?.completedLessons ?? 0;
+
+  return {
+    activeCourses: summary?.activeCourses ?? 0,
+    completedCourses: summary?.completedCourses ?? 0,
+    completedLessons,
+    totalLessons,
+    progressPercentage:
+      totalLessons === 0
+        ? 0
+        : Math.min(100, Math.round((completedLessons / totalLessons) * 100)),
+  };
+}
+
 function buildContinueLearningPipeline(learnerId, page, limit) {
   return [
     { $match: { learner: learnerId, status: "ACTIVE" } },

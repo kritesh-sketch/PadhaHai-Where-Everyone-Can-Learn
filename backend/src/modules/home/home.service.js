@@ -1,8 +1,8 @@
 import Course from "../courses/course.model.js";
 import Enrollment from "../enrollments/enrollment.model.js";
 
-const MIN_TRENDING_COURSES = 8;
-const MAX_TRENDING_COURSES = 20;
+const MIN_POPULAR_COURSES = 8;
+const MAX_POPULAR_COURSES = 20;
 
 export class RecommendationError extends Error {
   constructor(statusCode, message) {
@@ -112,125 +112,54 @@ export async function getRecommendedCourses(learner, query = {}) {
   };
 }
 
-/**
- * Retrieves the most popular published courses for the trending section.
- *
- * Ranks courses by enrollment count, using creation date as a secondary
- * sorting criterion. Populates category and instructor details and hides
- * the trending section when fewer than the required minimum courses exist.
- *
- * @param {Object} req - The request object containing the optional result limit.
- * @param {Object} res - The response object used to return trending courses and section visibility.
- * @param {Function} next - The middleware function for forwarding unhandled errors.
- * @returns {Promise<Object|void>} The trending course response or the result of error forwarding.
- */
-export async function popularCourses(req, res, next) {
-  try {
-    // Default to 8 courses and constrain the requested limit to 1–20.
-    const limit = Math.min(
-      Math.max(Number.parseInt(req.query.limit, 10) || 8, 1),
-      20,
-    );
+export async function getPopularCourses(query = {}) {
+  const limit = Math.min(
+    Math.max(Number.parseInt(query.limit, 10) || 8, 1),
+    MAX_POPULAR_COURSES,
+  );
+  const fetchLimit = Math.max(limit, MIN_POPULAR_COURSES);
 
-    // Always fetch at least 8 courses to check section visibility.
-    const fetchLimit = Math.max(limit, MIN_TRENDING_COURSES);
-
-    // Retrieve published courses and calculate active enrollment counts.
-    const courses = await courseModel.aggregate([
-      // Include only publicly published courses.
-      {
-        $match: {
-          status: "PUBLISHED",
-        },
-      },
-
-      // Join enrollment records for each course.
-      {
-        $lookup: {
-          from: enrollmentModel.collection.name,
-          let: { courseId: "$_id" },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $eq: ["$course", "$$courseId"],
-                },
-                status: "ACTIVE",
-              },
+  const courses = await Course.aggregate([
+    { $match: { status: "PUBLISHED" } },
+    {
+      $lookup: {
+        from: Enrollment.collection.name,
+        let: { courseId: "$_id" },
+        pipeline: [
+          {
+            $match: {
+              $expr: { $eq: ["$course", "$$courseId"] },
+              status: "ACTIVE",
             },
-            {
-              $count: "count",
-            },
-          ],
-          as: "enrollmentStats",
-        },
-      },
-
-      // Extract the enrollment count, defaulting to zero.
-      {
-        $addFields: {
-          enrollmentCount: {
-            $ifNull: [
-              {
-                $arrayElemAt: ["$enrollmentStats.count", 0],
-              },
-              0,
-            ],
           },
+          { $count: "count" },
+        ],
+        as: "enrollmentStats",
+      },
+    },
+    {
+      $addFields: {
+        enrollmentCount: {
+          $ifNull: [{ $arrayElemAt: ["$enrollmentStats.count", 0] }, 0],
         },
       },
+    },
+    { $project: { enrollmentStats: 0 } },
+    { $sort: { enrollmentCount: -1, createdAt: -1, _id: 1 } },
+    { $limit: fetchLimit },
+  ]);
 
-      // Remove temporary aggregation data.
-      {
-        $project: {
-          enrollmentStats: 0,
-        },
-      },
-
-      // Rank by active enrollments, then newest courses.
-      {
-        $sort: {
-          enrollmentCount: -1,
-          createdAt: -1,
-          _id: 1,
-        },
-      },
-
-      // Fetch enough courses to evaluate section visibility.
-      {
-        $limit: fetchLimit,
-      },
-    ]);
-
-    // Hide the section if fewer than 8 published courses exist.
-    if (courses.length < MIN_TRENDING_COURSES) {
-      return res.status(200).json({
-        courses: [],
-        showSection: false,
-      });
-    }
-
-    // Populate category and instructor details.
-    await courseModel.populate(courses, [
-      {
-        path: "category",
-        select: "name slug",
-      },
-      {
-        path: "instructor",
-        select: "firstName lastName username",
-      },
-    ]);
-
-    // Return only the requested number of courses.
-    return res.status(200).json({
-      courses: courses.slice(0, limit),
-      showSection: true,
-    });
-  } catch (error) {
-    return next(error);
+  if (courses.length < MIN_POPULAR_COURSES) {
+    return { courses: [], showSection: false };
   }
-}
 
-// Courses selected for homepage promotion
-export async function listContinueLearning(req, res, next) {}
+  await Course.populate(courses, [
+    { path: "category", select: "name slug" },
+    { path: "instructor", select: "firstName lastName username" },
+  ]);
+
+  return {
+    courses: courses.slice(0, limit),
+    showSection: true,
+  };
+}

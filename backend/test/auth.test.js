@@ -13,17 +13,23 @@ const [
   { default: config },
   { default: userModel },
   { default: sessionModel },
+  { default: emailService },
+  { createRateLimiter },
   { authorizeRoles },
 ] = await Promise.all([
   import("../src/app.js"),
   import("../src/config/config.js"),
   import("../src/modules/users/user.model.js"),
   import("../src/modules/auth/session.model.js"),
+  import("../src/services/email.service.js"),
+  import("../src/middleware/rate-limit.middleware.js"),
   import("../src/middleware/role.middleware.js"),
 ]);
 
 const users = new Map();
 const sessions = new Map();
+const verificationEmails = [];
+let emailDeliveryError = null;
 let server;
 let baseUrl;
 
@@ -33,6 +39,33 @@ function userById(id) {
 
 function sessionById(id) {
   return sessions.get(id.toString());
+}
+
+function matchesValue(value, condition) {
+  if (condition && typeof condition === "object" && !(condition instanceof Date)) {
+    if ("$exists" in condition) {
+      return condition.$exists ? value !== undefined : value === undefined;
+    }
+    if ("$gt" in condition) return value > condition.$gt;
+    if ("$lte" in condition) return value <= condition.$lte;
+  }
+  return value?.toString?.() === condition?.toString?.() || value === condition;
+}
+
+function matchesUser(user, query) {
+  return (
+    user &&
+    (!query.$or ||
+      query.$or.some((condition) =>
+        Object.entries(condition).every(([field, value]) =>
+          matchesValue(user[field], value),
+        ),
+      )) &&
+    Object.entries(query).every(
+      ([field, value]) =>
+        field === "$or" || matchesValue(user[field], value),
+    )
+  );
 }
 
 function matchesSession(session, query) {
@@ -48,20 +81,7 @@ function matchesSession(session, query) {
 
 function installModelStubs() {
   userModel.findOne = (query) => {
-    let result;
-    if (query.$or) {
-      result = [...users.values()].find((user) =>
-        query.$or.some((condition) =>
-          Object.entries(condition).some(
-            ([field, value]) => user[field] === value,
-          ),
-        ),
-      );
-    } else {
-      const [field, value] = Object.entries(query)[0] ?? [];
-      result = [...users.values()].find((user) => user[field] === value);
-    }
-
+    const result = [...users.values()].find((user) => matchesUser(user, query));
     const pending = Promise.resolve(result ?? null);
     pending.select = async () => result ?? null;
     return pending;
@@ -79,6 +99,20 @@ function installModelStubs() {
     };
     users.set(user._id.toString(), user);
     return user;
+  };
+  userModel.findOneAndUpdate = async (query, update) => {
+    const user = [...users.values()].find((item) => matchesUser(item, query));
+    if (!user) return null;
+    Object.assign(user, update.$set);
+    for (const field of Object.keys(update.$unset ?? {})) delete user[field];
+    return user;
+  };
+  userModel.updateOne = async (query, update) => {
+    const user = [...users.values()].find((item) => matchesUser(item, query));
+    if (!user) return { matchedCount: 0 };
+    Object.assign(user, update.$set);
+    for (const field of Object.keys(update.$unset ?? {})) delete user[field];
+    return { matchedCount: 1 };
   };
   userModel.findById = async (id) => userById(id) ?? null;
   userModel.find = () => {
@@ -197,6 +231,11 @@ async function createAuthorizedUser(role) {
 
 before(async () => {
   installModelStubs();
+  emailService.sendVerificationEmail = async (message) => {
+    if (emailDeliveryError) throw emailDeliveryError;
+    verificationEmails.push(message);
+    return { messageId: "test-message" };
+  };
   server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -205,6 +244,8 @@ before(async () => {
 beforeEach(() => {
   users.clear();
   sessions.clear();
+  verificationEmails.length = 0;
+  emailDeliveryError = null;
 });
 
 after(async () => {
@@ -244,6 +285,7 @@ test("student registration normalizes identity fields and stores a password hash
   assert.equal(body.user.username, "test_learner");
   assert.equal(body.user.email, "test@example.com");
   assert.equal(body.user.isActive, true);
+  assert.equal(body.user.isEmailVerified, false);
   assert.ok(body.user.createdAt);
   assert.ok(body.accessToken);
   assert.ok(setCookie?.includes("HttpOnly"));
@@ -252,6 +294,18 @@ test("student registration normalizes identity fields and stores a password hash
   const user = userById(body.user.id);
   assert.notEqual(user.password, "securePass123");
   assert.equal(await bcrypt.compare("securePass123", user.password), true);
+  assert.equal(user.isEmailVerified, false);
+  assert.equal(user.emailVerificationTokenHash.length, 64);
+  assert.ok(user.emailVerificationExpiresAt > new Date(Date.now() + 29 * 60_000));
+  assert.equal(verificationEmails.length, 1);
+  assert.equal(
+    createHash("sha256")
+      .update(verificationEmails[0].token)
+      .digest("hex"),
+    user.emailVerificationTokenHash,
+  );
+  assert.equal("emailVerificationTokenHash" in body.user, false);
+  assert.equal("emailVerificationExpiresAt" in body.user, false);
 });
 
 test("instructor registration assigns instructor role and rejects duplicate accounts", async () => {
@@ -272,6 +326,175 @@ test("instructor registration assigns instructor role and rejects duplicate acco
   assert.equal(duplicateUsername.response.status, 409);
 });
 
+test("verification accepts a valid token exactly once and clears its stored hash", async () => {
+  const registration = await register("");
+  const token = verificationEmails[0].token;
+  const result = await request("/api/auth/verify-email", {
+    method: "POST",
+    body: { token },
+  });
+
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.message, "Email verified successfully. You can now sign in.");
+  assert.equal(result.response.headers.get("cache-control"), "no-store");
+  assert.equal(result.response.headers.get("referrer-policy"), "no-referrer");
+
+  const user = userById(registration.body.user.id);
+  assert.equal(user.isEmailVerified, true);
+  assert.equal("emailVerificationTokenHash" in user, false);
+  assert.equal("emailVerificationExpiresAt" in user, false);
+
+  const reuse = await request("/api/auth/verify-email", {
+    method: "POST",
+    body: { token },
+  });
+  assert.equal(reuse.response.status, 400);
+});
+
+test("invalid, malformed, and expired verification tokens are rejected", async () => {
+  const missing = await request("/api/auth/verify-email", { method: "POST" });
+  assert.equal(missing.response.status, 400);
+
+  const malformed = await request("/api/auth/verify-email", {
+    method: "POST",
+    body: { token: "not-a-token" },
+  });
+  assert.equal(malformed.response.status, 400);
+
+  const registration = await register("");
+  const token = verificationEmails[0].token;
+  const user = userById(registration.body.user.id);
+  user.emailVerificationExpiresAt = new Date(Date.now() - 1);
+
+  const expired = await request("/api/auth/verify-email", {
+    method: "POST",
+    body: { token },
+  });
+  assert.equal(expired.response.status, 400);
+  assert.equal(user.isEmailVerified, false);
+});
+
+test("concurrent verification requests can consume a token only once", async () => {
+  await register("");
+  const token = verificationEmails[0].token;
+  const verify = () =>
+    request("/api/auth/verify-email", { method: "POST", body: { token } });
+  const results = await Promise.all([verify(), verify()]);
+
+  assert.deepEqual(
+    results.map(({ response }) => response.status).sort(),
+    [200, 400],
+  );
+});
+
+test("resending replaces old tokens, enforces a cooldown, and remains generic", async () => {
+  await register("");
+  const user = [...users.values()][0];
+  const oldToken = verificationEmails[0].token;
+
+  const cooldown = await request("/api/auth/resend-verification-email", {
+    method: "POST",
+    body: { email: user.email },
+  });
+  assert.equal(cooldown.response.status, 202);
+  assert.equal(verificationEmails.length, 1);
+
+  user.emailVerificationExpiresAt = new Date(Date.now() - 1);
+  const resent = await request("/api/auth/resend-verification-email", {
+    method: "POST",
+    body: { email: user.email.toUpperCase() },
+  });
+  assert.equal(resent.response.status, 202);
+  assert.equal(verificationEmails.length, 2);
+  assert.notEqual(
+    user.emailVerificationTokenHash,
+    createHash("sha256").update(oldToken).digest("hex"),
+  );
+
+  const oldTokenResult = await request("/api/auth/verify-email", {
+    method: "POST",
+    body: { token: oldToken },
+  });
+  assert.equal(oldTokenResult.response.status, 400);
+
+  const unknownEmail = await request("/api/auth/resend-verification-email", {
+    method: "POST",
+    body: { email: "nobody@example.com" },
+  });
+  assert.equal(unknownEmail.response.status, 202);
+  assert.equal(unknownEmail.body.message, resent.body.message);
+
+  const verified = await request("/api/auth/verify-email", {
+    method: "POST",
+    body: { token: verificationEmails[1].token },
+  });
+  assert.equal(verified.response.status, 200);
+  const alreadyVerified = await request("/api/auth/resend-verification-email", {
+    method: "POST",
+    body: { email: user.email },
+  });
+  assert.equal(alreadyVerified.response.status, 202);
+  assert.equal(verificationEmails.length, 2);
+});
+
+test("email delivery failure preserves the account and allows a later resend", async () => {
+  emailDeliveryError = Object.assign(new Error("private SMTP failure"), {
+    code: "ECONNECTION",
+  });
+  const registration = await register("");
+
+  assert.equal(registration.response.status, 201);
+  assert.equal(registration.body.verificationEmailSent, false);
+  assert.match(registration.body.message, /could not be sent/);
+  const user = userById(registration.body.user.id);
+  assert.equal(user.isEmailVerified, false);
+  assert.equal("emailVerificationTokenHash" in user, false);
+  assert.equal(verificationEmails.length, 0);
+  assert.equal((await register("")).response.status, 409);
+
+  emailDeliveryError = null;
+  const resend = await request("/api/auth/resend-verification-email", {
+    method: "POST",
+    body: { email: user.email },
+  });
+  assert.equal(resend.response.status, 202);
+  assert.equal(verificationEmails.length, 1);
+});
+
+test("verification email input is validated and rate limiting rejects excess requests", async () => {
+  const invalidEmail = await request("/api/auth/resend-verification-email", {
+    method: "POST",
+    body: { email: "not-an-email" },
+  });
+  assert.equal(invalidEmail.response.status, 400);
+
+  const limiter = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: 2,
+    message: "Limited",
+  });
+  const statuses = [];
+  const invokeLimiter = () =>
+    limiter(
+      { ip: "test-client" },
+      {
+        set() {},
+        status(status) {
+          statuses.push(status);
+          return this;
+        },
+        json() {},
+      },
+      () => statuses.push(200),
+    );
+
+  invokeLimiter();
+  invokeLimiter();
+  invokeLimiter();
+  assert.deepEqual(statuses, [200, 200, 429]);
+  limiter.reset();
+});
+
 test("login accepts username or email and rejects invalid credentials", async () => {
   await register("");
 
@@ -281,10 +504,20 @@ test("login accepts username or email and rejects invalid credentials", async ()
   });
   assert.equal(byUsername.response.status, 200);
   assert.ok(byUsername.body.accessToken);
+  assert.doesNotMatch(byUsername.setCookie, /;\s*max-age=/i);
+  assert.equal([...sessions.values()][1].rememberMe, false);
+  assert.ok(
+    [...sessions.values()][1].expiresAt > new Date(Date.now() + 6 * 24 * 60 * 60 * 1000),
+  );
+  assert.equal(byUsername.body.user.isEmailVerified, false);
 
   const byEmail = await request("/api/auth/login", {
     method: "POST",
-    body: { email: "TEST@example.com", password: "securePass123" },
+    body: {
+      email: "TEST@example.com",
+      password: "securePass123",
+      rememberMe: false,
+    },
   });
   assert.equal(byEmail.response.status, 200);
 
@@ -294,6 +527,63 @@ test("login accepts username or email and rejects invalid credentials", async ()
   });
   assert.equal(invalid.response.status, 401);
   assert.equal(invalid.body.message, "Invalid credentials");
+});
+
+test("remember me creates a persistent session and preserves its expiration on refresh", async () => {
+  await register("");
+  const user = [...users.values()][0];
+
+  const loginResult = await request("/api/auth/login", {
+    method: "POST",
+    body: {
+      identifier: user.username,
+      password: "securePass123",
+      rememberMe: true,
+    },
+  });
+  assert.equal(loginResult.response.status, 200);
+  assert.match(loginResult.setCookie, /;\s*max-age=/i);
+
+  const initialCookie = cookieValue(loginResult.setCookie);
+  const session = [...sessions.values()].find((item) => item.rememberMe);
+  assert.ok(session);
+  const originalExpiration = session.expiresAt.getTime();
+  assert.ok(originalExpiration > Date.now() + 29 * 24 * 60 * 60 * 1000);
+  assert.equal(
+    jwt.decode(initialCookie.split("=")[1]).exp,
+    Math.floor(originalExpiration / 1000),
+  );
+
+  const refreshed = await request("/api/auth/refresh-token", {
+    method: "POST",
+    cookie: initialCookie,
+  });
+  assert.equal(refreshed.response.status, 200);
+  assert.match(refreshed.setCookie, /;\s*max-age=/i);
+  assert.notEqual(cookieValue(refreshed.setCookie), initialCookie);
+  assert.equal(session.expiresAt.getTime(), originalExpiration);
+  assert.equal(
+    jwt.decode(cookieValue(refreshed.setCookie).split("=")[1]).exp,
+    Math.floor(originalExpiration / 1000),
+  );
+});
+
+test("login rejects non-boolean rememberMe values", async () => {
+  for (const rememberMe of ["true", 1, null]) {
+    const result = await request("/api/auth/login", {
+      method: "POST",
+      body: {
+        identifier: "learner@example.com",
+        password: "securePass123",
+        rememberMe,
+      },
+    });
+    assert.equal(result.response.status, 400);
+    assert.equal(
+      result.body.errors.some((error) => error.field === "rememberMe"),
+      true,
+    );
+  }
 });
 
 test("legacy SHA-256 passwords are upgraded after a successful login", async () => {
@@ -391,11 +681,26 @@ test("refresh tokens rotate and logout invalidates the access session", async ()
     cookie: cookieValue(refreshed.setCookie),
   });
   assert.equal(logoutResult.response.status, 200);
+  assert.match(logoutResult.setCookie, /^refreshToken=;/);
+  assert.equal([...sessions.values()][0].revoked, true);
 
   const profile = await request("/api/auth/me", {
     token: refreshed.body.accessToken,
   });
   assert.equal(profile.response.status, 401);
+});
+
+test("logout with an access token revokes its session when the refresh cookie is absent", async () => {
+  const registration = await register("");
+  const session = [...sessions.values()][0];
+
+  const logoutResult = await request("/api/auth/logout", {
+    method: "POST",
+    token: registration.body.accessToken,
+  });
+  assert.equal(logoutResult.response.status, 200);
+  assert.equal(session.revoked, true);
+  assert.match(logoutResult.setCookie, /^refreshToken=;/);
 });
 
 test("expired refresh tokens are rejected and their sessions are revoked", async () => {
@@ -421,6 +726,34 @@ test("expired refresh tokens are rejected and their sessions are revoked", async
   assert.equal(result.response.status, 401);
   assert.equal(result.body.message, "Refresh token has expired");
   assert.equal(session.revoked, true);
+});
+
+test("refresh rejects an expired server-side session", async () => {
+  const { user } = await createAuthorizedUser("LEARNER");
+  const validRefresh = jwt.sign(
+    {
+      sub: user._id.toString(),
+      tokenType: "refresh",
+      exp: Math.floor(Date.now() / 1000) + 60,
+    },
+    config.JWT_SECRET,
+    { algorithm: "HS256" },
+  );
+  const refreshHash = createHash("sha256").update(validRefresh).digest("hex");
+  await sessionModel.create({
+    user: user._id,
+    refreshTokenHash: refreshHash,
+    ip: "127.0.0.1",
+    userAgent: "auth tests",
+    expiresAt: new Date(Date.now() - 1),
+  });
+
+  const result = await request("/api/auth/refresh-token", {
+    method: "POST",
+    cookie: `refreshToken=${validRefresh}`,
+  });
+  assert.equal(result.response.status, 401);
+  assert.equal(result.body.message, "Invalid refresh token");
 });
 
 test("role middleware authorizes matching and multiple roles and denies other roles", async () => {

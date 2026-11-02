@@ -396,6 +396,10 @@ const userSchema = new mongoose.Schema(
 // Assigning position for First name & Last name
 userSchema.index({ firstName: 1 });
 userSchema.index({ lastName: 1 });
+userSchema.index(
+  { emailVerificationTokenHash: 1 },
+  { unique: true, sparse: true },
+);
 
 // Creating rows & column in for storing data
 const userModel = mongoose.model("User", userSchema);

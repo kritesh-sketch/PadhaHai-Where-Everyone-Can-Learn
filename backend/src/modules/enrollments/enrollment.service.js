@@ -1,3 +1,5 @@
+import mongoose from "mongoose";
+
 import courseModel from "../courses/course.model.js";
 import lessonModel from "../lessons/lesson.model.js";
 import progressModel from "../progress/progress.model.js";
@@ -76,20 +78,27 @@ function requireLearner(user) {
  * @param {string|Object} courseId - The ID of the course associated with the enrollment.
  * @returns {Promise<Object|null>} The updated enrollment document, or null if no matching withdrawn enrollment exists.
  */
-async function activateWithdrawnEnrollment(learnerId, courseId) {
-  // Find the learner's withdrawn enrollment for the specified course and reactivate it.
+async function activateWithdrawnEnrollment(learnerId, courseId, session) {
   return enrollmentModel.findOneAndUpdate(
-    { learner: learnerId, course: courseId, status: "WITHDRAWN" },
+    {
+      learner: learnerId,
+      course: courseId,
+      status: "WITHDRAWN",
+    },
     {
       $set: {
-        status: "ACTIVE", // Restore the enrollment to active status.
-        completedAt: null, // Clear the previous completion timestamp.
-        withdrawnAt: null, // Remove the previous withdrawal timestamp.
-        suspendedAt: null, // Clear any previous suspension timestamp.
-        suspendedBy: null, // Remove the previous suspension actor.
+        status: "ACTIVE",
+        completedAt: null,
+        withdrawnAt: null,
+        suspendedAt: null,
+        suspendedBy: null,
       },
     },
-    { new: true, runValidators: true },
+    {
+      new: true,
+      runValidators: true,
+      session,
+    },
   );
 }
 
@@ -106,148 +115,166 @@ async function activateWithdrawnEnrollment(learnerId, courseId) {
  * @throws {EnrollmentError} If the learner is ineligible, the course is unavailable, or enrollment cannot proceed.
  * @returns {Promise<Object>} An object containing the enrollment document and creation/reactivation flags.
  */
+
 export async function enrollLearner(user, courseId) {
-  // Ensure that only active learners can perform enrollment operations.
+  // Ensure that only active learners can enroll.
   requireLearner(user);
 
-  // Reject invalid course identifiers before querying the database.
+  // Reject invalid course identifiers.
   if (!validateCourseId(courseId)) {
     throw new EnrollmentError(400, "Course ID is invalid");
   }
 
-  // Retrieve the published course and the fields required for enrollment checks.
-  const course = await courseModel
-    .findOne({ _id: courseId, status: "PUBLISHED" })
-    .select("_id enrollmentOpen visibility maxStudents")
-    .lean();
-
-  // Return a not-found error when the course does not exist or is not published.
-  if (!course) {
-    throw new EnrollmentError(404, "Course not found");
-  }
-
-  // Prevent enrollment when the course is closed or restricted to private access.
-  if (course.enrollmentOpen === false || course.visibility === "PRIVATE") {
-    throw new EnrollmentError(409, "Course is not accepting enrollments");
-  }
-
-  // Extract the authenticated learner's ID for enrollment queries and updates.
   const learnerId = user._id;
 
-  // Check whether this learner already has an enrollment record for the course.
-  const existing = await enrollmentModel.findOne({
-    learner: learnerId,
-    course: courseId,
-  });
-
-  // Prevent suspended enrollments from being reactivated through the enrollment endpoint.
-  if (existing?.status === "SUSPENDED") {
-    throw new EnrollmentError(
-      409,
-      "This enrollment is suspended and cannot be reactivated",
-    );
-  } else if (existing && existing.status !== "WITHDRAWN") {
-    // Return the existing enrollment when it does not need reactivation.
-    return { enrollment: existing, created: false, reactivated: false };
-  }
-
-  // Enforce the course capacity limit when a maximum enrollment count is configured.
-  if (course.maxStudents !== null && course.maxStudents !== undefined) {
-    // Count active and completed enrollments toward the course's capacity.
-    const activeEnrollmentCount = await enrollmentModel.countDocuments({
-      course: courseId,
-      status: { $in: ["ACTIVE", "COMPLETED"] },
-    });
-
-    // Reject enrollment when the configured capacity has already been reached.
-    if (activeEnrollmentCount >= course.maxStudents) {
-      throw new EnrollmentError(409, "Course has reached its enrollment limit");
-    }
-  }
-
-  // Reactivate the existing record instead of creating a duplicate enrollment.
-  if (existing?.status === "WITHDRAWN") {
-    const reactivated = await activateWithdrawnEnrollment(learnerId, courseId);
-
-    // Return the reactivated enrollment when the update succeeds.
-    if (reactivated) {
-      return { enrollment: reactivated, created: false, reactivated: true };
-    }
-  }
+  const session = await mongoose.startSession();
+  let result;
 
   try {
-    // Create a new active enrollment when no reusable enrollment record exists.
-    const enrollment = await enrollmentModel.create({
-      learner: learnerId,
-      course: courseId,
-      status: "ACTIVE",
-    });
+    await session.withTransaction(async () => {
+      // Retrieve the published course.
+      const course = await courseModel
+        .findOne({
+          _id: courseId,
+          status: "PUBLISHED",
+        })
+        .select("_id enrollmentOpen visibility maxStudents")
+        .session(session)
+        .lean();
 
-    // Indicate that a new enrollment record was created.
-    return { enrollment, created: true, reactivated: false };
-  } catch (error) {
-    // Re-throw errors that are unrelated to duplicate enrollment records.
-    if (error.code !== 11000) {
-      throw error;
-    }
+      if (!course) {
+        throw new EnrollmentError(404, "Course not found");
+      }
 
-    // Retrieve the enrollment created or modified by a concurrent request.
-    const racedEnrollment = await enrollmentModel.findOne({
-      learner: learnerId,
-      course: courseId,
-    });
+      // Check course enrollment availability.
+      if (course.enrollmentOpen === false || course.visibility === "PRIVATE") {
+        throw new EnrollmentError(409, "Course is not accepting enrollments");
+      }
 
-    // Retry reactivation if another request left the enrollment withdrawn.
-    if (racedEnrollment?.status === "WITHDRAWN") {
-      // Recheck course capacity before attempting to reactivate the enrollment.
-      if (course.maxStudents !== null && course.maxStudents !== undefined) {
-        const activeEnrollmentCount = await enrollmentModel.countDocuments({
+      // Find the learner's existing enrollment.
+      const existing = await enrollmentModel
+        .findOne({
+          learner: learnerId,
           course: courseId,
-          status: { $in: ["ACTIVE", "COMPLETED"] },
-        });
+        })
+        .session(session);
 
-        // Prevent reactivation if the course has reached its enrollment limit.
-        if (activeEnrollmentCount >= course.maxStudents) {
+      if (existing?.status === "SUSPENDED") {
+        throw new EnrollmentError(
+          409,
+          "This enrollment is suspended and cannot be reactivated",
+        );
+      }
+
+      // Return an existing active or completed enrollment.
+      if (existing && existing.status !== "WITHDRAWN") {
+        result = {
+          enrollment: existing,
+          created: false,
+          reactivated: false,
+        };
+        return;
+      }
+
+      // Check course capacity.
+      // Reserve an enrollment slot by atomically increasing the course count.
+      const capacityFilter = { _id: courseId };
+
+      if (course.maxStudents !== null && course.maxStudents !== undefined) {
+        capacityFilter.enrollmentCount = {
+          $lt: course.maxStudents,
+        };
+      }
+
+      const capacityUpdate = await courseModel.updateOne(
+        capacityFilter,
+        { $inc: { enrollmentCount: 1 } },
+        { session },
+      );
+
+      if (capacityUpdate.matchedCount !== 1) {
+        throw new EnrollmentError(
+          409,
+          "Course has reached its enrollment limit",
+        );
+      }
+
+      // Reactivate a withdrawn enrollment.
+      if (existing?.status === "WITHDRAWN") {
+        const reactivated = await activateWithdrawnEnrollment(
+          learnerId,
+          courseId,
+          session,
+        );
+
+        if (!reactivated) {
           throw new EnrollmentError(
             409,
-            "Course has reached its enrollment limit",
+            "Enrollment status changed. Please try again",
           );
         }
+
+        result = {
+          enrollment: reactivated,
+          created: false,
+          reactivated: true,
+        };
+
+        return;
       }
 
-      // Attempt to reactivate the existing enrollment after the duplicate-key conflict.
-      const reactivated = await activateWithdrawnEnrollment(
-        learnerId,
-        courseId,
-      );
+      // Create a new enrollment.
+      const enrollment = new enrollmentModel({
+        learner: learnerId,
+        course: courseId,
+        status: "ACTIVE",
+      });
 
-      // Return the reactivated enrollment when the update succeeds.
-      if (reactivated) {
-        return { enrollment: reactivated, created: false, reactivated: true };
-      }
-    }
+      await enrollment.save({ session });
 
-    // Preserve the restriction against reactivating suspended enrollments.
-    if (racedEnrollment?.status === "SUSPENDED") {
-      throw new EnrollmentError(
-        409,
-        "This enrollment is suspended and cannot be reactivated",
-      );
-    }
-
-    // Return the enrollment created by the competing request when it exists.
-    if (racedEnrollment) {
-      return {
-        enrollment: racedEnrollment,
-        created: false,
+      result = {
+        enrollment,
+        created: true,
         reactivated: false,
       };
+    });
+
+    return result;
+  } catch (error) {
+    // Handle duplicate enrollment requests after the transaction ends.
+    if (error.code === 11000) {
+      const racedEnrollment = await enrollmentModel.findOne({
+        learner: learnerId,
+        course: courseId,
+      });
+
+      if (racedEnrollment?.status === "SUSPENDED") {
+        throw new EnrollmentError(
+          409,
+          "This enrollment is suspended and cannot be reactivated",
+        );
+      }
+
+      if (racedEnrollment && racedEnrollment.status !== "WITHDRAWN") {
+        return {
+          enrollment: racedEnrollment,
+          created: false,
+          reactivated: false,
+        };
+      }
+
+      throw new EnrollmentError(
+        409,
+        "Enrollment changed during this request. Please try again",
+      );
     }
 
-    // Return a conflict when the duplicate-key error cannot be reconciled with an existing record.
-    throw new EnrollmentError(409, "Enrollment already exists");
+    throw error;
+  } finally {
+    await session.endSession();
   }
 }
+
 /**
  * Retrieves the authenticated learner's enrollments with pagination and progress details.
  *
@@ -412,35 +439,65 @@ export async function withdrawEnrollment(user, enrollmentId) {
     throw new EnrollmentError(400, "Enrollment ID is invalid");
   }
 
-  // Withdraw the enrollment only when it belongs to the learner and is active.
-  const enrollment = await enrollmentModel.findOneAndUpdate(
-    {
+  const session = await mongoose.startSession();
+  let enrollment = null;
+
+  try {
+    await session.withTransaction(async () => {
+      result = null;
+      enrollment = null;
+
+      enrollment = await enrollmentModel.findOneAndUpdate(
+        {
+          _id: enrollmentId,
+          learner: user._id,
+          status: "ACTIVE",
+        },
+        { $set: { status: "WITHDRAWN", withdrawnAt: new Date() } },
+        {
+          new: true,
+          runValidators: true,
+          session,
+        },
+      );
+
+      if (!enrollment) return;
+
+      // Decrease the course enrollment count after successful withdrawal.
+      const countUpdate = await courseModel.updateOne(
+        {
+          _id: enrollment.course,
+          enrollmentCount: { $gt: 0 },
+        },
+        { $inc: { enrollmentCount: -1 } },
+        { session },
+      );
+
+      if (countUpdate.matchedCount !== 1) {
+        throw new EnrollmentError(
+          500,
+          "Course enrollment count could not be updated",
+        );
+      }
+    });
+
+    if (enrollment) {
+      return enrollment;
+    }
+
+    const existing = await enrollmentModel.findOne({
       _id: enrollmentId,
       learner: user._id,
-      status: "ACTIVE",
-    },
-    { $set: { status: "WITHDRAWN", withdrawnAt: new Date() } },
-    { new: true, runValidators: true },
-  );
+    });
 
-  // Return the updated enrollment when the withdrawal succeeds.
-  if (enrollment) {
-    return enrollment;
+    if (!existing) {
+      throw new EnrollmentError(404, "Enrollment not found");
+    }
+
+    throw new EnrollmentError(409, "Only active enrollments can be withdrawn");
+  } finally {
+    await session.endSession();
   }
-
-  // Determine whether the enrollment is missing or simply ineligible for withdrawal.
-  const existing = await enrollmentModel.findOne({
-    _id: enrollmentId,
-    learner: user._id,
-  });
-
-  // Return not found when the enrollment does not belong to this learner or no longer exists.
-  if (!existing) {
-    throw new EnrollmentError(404, "Enrollment not found");
-  }
-
-  // Allow withdrawal only from the ACTIVE status.
-  throw new EnrollmentError(409, "Only active enrollments can be withdrawn");
 }
 
 /**
@@ -783,43 +840,92 @@ export async function setEnrollmentSuspension(admin, enrollmentId, status) {
     throw new EnrollmentError(400, "Only ACTIVE or SUSPENDED is allowed");
   }
 
-  // Retrieve the current enrollment to validate the requested status transition.
-  const current = await enrollmentModel.findById(enrollmentId);
-  if (!current) {
-    throw new EnrollmentError(404, "Enrollment not found");
+  const session = await mongoose.startSession();
+  let enrollment = null;
+
+  try {
+    await session.withTransaction(async () => {
+      enrollment = null;
+
+      // Retrieve the current enrollment inside the transaction.
+      const current = await enrollmentModel
+        .findById(enrollmentId)
+        .session(session);
+
+      if (!current) {
+        throw new EnrollmentError(404, "Enrollment not found");
+      }
+
+      // Validate the requested status transition.
+      if (
+        (status === "SUSPENDED" && current.status !== "ACTIVE") ||
+        (status === "ACTIVE" && current.status !== "SUSPENDED")
+      ) {
+        throw new EnrollmentError(
+          409,
+          "Enrollment cannot make that status transition",
+        );
+      }
+
+      // Record suspension details or clear them when reactivating.
+      const fields =
+        status === "SUSPENDED"
+          ? {
+              status,
+              suspendedAt: new Date(),
+              suspendedBy: admin._id,
+            }
+          : {
+              status,
+              suspendedAt: null,
+              suspendedBy: null,
+            };
+
+      // Update only if the enrollment still has the expected status.
+      enrollment = await enrollmentModel.findOneAndUpdate(
+        { _id: enrollmentId, status: current.status },
+        { $set: fields },
+        {
+          new: true,
+          runValidators: true,
+          session,
+        },
+      );
+
+      if (!enrollment) {
+        throw new EnrollmentError(409, "Enrollment changed; retry the request");
+      }
+
+      // Update the course enrollment count.
+      const countUpdate =
+        status === "SUSPENDED"
+          ? await courseModel.updateOne(
+              {
+                _id: enrollment.course,
+                enrollmentCount: { $gt: 0 },
+              },
+              { $inc: { enrollmentCount: -1 } },
+              { session },
+            )
+          : await courseModel.updateOne(
+              { _id: enrollment.course },
+              { $inc: { enrollmentCount: 1 } },
+              { session },
+            );
+
+      // Ensure the course count was successfully updated.
+      if (countUpdate.matchedCount !== 1) {
+        throw new EnrollmentError(
+          500,
+          "Course enrollment count could not be updated",
+        );
+      }
+    });
+
+    return enrollment;
+  } finally {
+    await session.endSession();
   }
-
-  // Prevent invalid transitions, such as suspending a completed or withdrawn enrollment.
-  if (
-    (status === "SUSPENDED" && current.status !== "ACTIVE") ||
-    (status === "ACTIVE" && current.status !== "SUSPENDED")
-  ) {
-    throw new EnrollmentError(
-      409,
-      "Enrollment cannot make that status transition",
-    );
-  }
-
-  // Record suspension details or clear them when restoring an enrollment to active status.
-  const fields =
-    status === "SUSPENDED"
-      ? { status, suspendedAt: new Date(), suspendedBy: admin._id }
-      : { status, suspendedAt: null, suspendedBy: null };
-
-  // Update only if the enrollment still has the status checked above.
-  const enrollment = await enrollmentModel.findOneAndUpdate(
-    { _id: enrollmentId, status: current.status },
-    { $set: fields },
-    { new: true, runValidators: true },
-  );
-
-  // Report a conflict if another request changed the enrollment first.
-  if (!enrollment) {
-    throw new EnrollmentError(409, "Enrollment changed; retry the request");
-  }
-
-  // Return the updated enrollment document.
-  return enrollment;
 }
 
 /**

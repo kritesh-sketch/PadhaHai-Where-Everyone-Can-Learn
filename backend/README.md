@@ -22,6 +22,8 @@ course or lesson returns it to `DRAFT` for admin moderation.
 | POST | `/api/auth/register/learner` | Public | Register a learner |
 | POST | `/api/auth/register/instructor` | Public | Register an instructor |
 | POST | `/api/auth/login` | Public | Log in with email or username |
+| POST | `/api/auth/verify-email` | Public | Verify an email address |
+| POST | `/api/auth/resend-verification-email` | Public | Request a verification email |
 | POST | `/api/auth/reactivate` | Public, credentials required | Reactivate an inactive account |
 | POST | `/api/auth/refresh-token` | Refresh cookie | Rotate tokens |
 | POST | `/api/auth/logout` | Refresh cookie or access token | Revoke session |
@@ -88,6 +90,84 @@ statuses are `ACTIVE`, `INACTIVE`, and `SUSPENDED`. Email addresses and
 usernames are unique and are normalized to lowercase. Passwords are hashed
 before storage and excluded from API responses.
 
+### Email verification
+
+Registration creates an unverified account and requests a verification email.
+The existing registration response/session behavior is retained; this
+application does not currently require verified email before login. The
+response includes `user.isEmailVerified` and `verificationEmailSent` so clients
+can show a pending-verification state. If email delivery fails, the account
+remains available and unverified, its unusable token is cleared, and the
+response explains that the user can request a new email.
+
+Set the SMTP and frontend URL variables shown in the repository's
+[`.env.example`](../.env.example) in the backend environment.
+`EMAIL_SMTP_SECURE=true` is
+appropriate for implicit TLS (commonly port 465); use `false` for STARTTLS
+(commonly port 587). The sender must be authorized by the SMTP provider.
+Production requires an HTTPS `FRONTEND_URL`. SMTP settings are validated when
+the first verification email is sent, so an unconfigured mail provider does
+not prevent the API from starting.
+
+The verification email links to
+`{FRONTEND_URL}/verify-email?token=...`. A frontend should read the token only
+to call the API, avoid analytics/tracking on this page, use a
+`Referrer-Policy: no-referrer` response header, and remove the token from the
+address bar after the verification request. The API does not trust a page load
+as verification: it atomically consumes the token through the verification
+endpoint. Tokens expire after 30 minutes.
+
+Postman verification request:
+
+```http
+POST http://localhost:3001/api/auth/verify-email
+Content-Type: application/json
+
+{"token":"<64-character-token-from-the-email-link>"}
+```
+
+Success returns `200` with
+`{"message":"Email verified successfully. You can now sign in."}`. Invalid,
+expired, or previously consumed links return `400` with a generic
+`{"message":"Verification link is invalid or expired"}` response.
+
+The emailed link opens the frontend route, which should submit the query-string
+token in this POST body. A legacy `GET /api/auth/verify-email?token=...` API
+route also remains available for compatibility; new clients should use POST.
+
+Postman resend request:
+
+```http
+POST http://localhost:3001/api/auth/resend-verification-email
+Content-Type: application/json
+
+{"email":"learner@example.com"}
+```
+
+Valid requests return `202` with the same generic message whether or not the
+account exists or is already verified. Resends are limited to five requests
+per client IP per hour and have a one-minute per-account cooldown.
+Verification attempts are limited to 30 per client IP per 15 minutes. These
+limits are in-process; configure Express trusted-proxy settings correctly when
+running behind a proxy, and enforce equivalent shared limits at the edge or
+through a shared rate-limit store when deploying multiple API instances.
+The prior `POST /api/auth/resend-verification` route remains available for
+compatibility.
+
+For local testing, provide SMTP values for an owned test mailbox or a local
+SMTP capture service. Register through `POST /api/auth/register`, inspect the
+verification message, follow its link (or copy the token to the verification
+API request above), and confirm a second use fails. To test expiry, set the
+account's `emailVerificationExpiresAt` to a past date in a development
+database, then verify the saved link is rejected. To test resending, wait one
+minute (or expire the current token in the development database), call the
+resend endpoint, and confirm only the new link works. Automated tests replace
+the email service and never deliver real messages.
+
+This repository snapshot contains the backend only; no frontend application
+or router is available to add the pending and result screens. The API response
+fields and link contract above are intended for those UI states.
+
 `PATCH /api/users/me` accepts profile fields such as `firstName`, `lastName`,
 `username`, `email`, `phone`, and `bio`; it does not accept `role`, `status`, or
 other unlisted fields. A duplicate email or username returns HTTP 409.
@@ -106,7 +186,41 @@ Learners and instructors can deactivate their own account at
 credentials at `POST /api/auth/reactivate`; suspended accounts must be restored
 by an administrator.
 
+### Remember Me
+
+`POST /api/auth/login` accepts an optional Boolean `rememberMe` field. It
+defaults to `false`; values such as the string `"true"` are rejected. Normal
+sessions expire after seven days on the server and use a browser-session
+refresh-token cookie. With `rememberMe: true`, the session and refresh token
+expire after `REMEMBER_ME_SESSION_DAYS` (30 days by default), and the cookie
+persists for only the remaining session lifetime. Refresh-token rotation does
+not extend either session's original expiration. Access tokens remain valid
+for 15 minutes.
+
+Set `REMEMBER_ME_SESSION_DAYS` to a positive whole number in the backend
+environment to change the persistent-session duration.
+
+Postman login request:
+
+```http
+POST http://localhost:3001/api/auth/login
+Content-Type: application/json
+
+{
+  "identifier": "learner@example.com",
+  "password": "your-password",
+  "rememberMe": true
+}
+```
+
+Use `false` or omit `rememberMe` for a browser-session cookie. Send the cookie
+automatically retained by Postman to `POST /api/auth/refresh-token` to rotate
+tokens, or to `POST /api/auth/logout` to revoke the session.
+
 ## Development and verification
 
-Run the backend with `npm run dev` and run the authentication/RBAC and user
-management API tests with `npm test`.
+Run the backend with `npm run dev` and run the automated backend tests with
+`npm test`. This command only runs files in `test/`; it does not run
+`scripts/test-email.js`, which sends a real message to `TEST_EMAIL`. Run
+`node scripts/test-email.js` manually only when you intentionally want to send
+a live SMTP test email.

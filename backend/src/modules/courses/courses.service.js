@@ -23,7 +23,11 @@ export async function trendingCourses(req, res, next) {
     // Retrieve published courses, calculate their enrollment counts, and rank the most popular first.
     const courses = await courseModel.aggregate([
       // Exclude courses that are not publicly published.
-      { $match: { status: "PUBLISHED" } },
+      {
+        status: "PUBLISHED",
+        visibility: "PUBLIC",
+        isDeleted: false,
+      },
 
       // Join enrollment records associated with each course.
       {
@@ -63,7 +67,10 @@ export async function trendingCourses(req, res, next) {
     ]);
 
     // Return the ranked courses for display in the trending section.
-    return res.status(200).json({ courses });
+    return res.status(200).json({
+      courses,
+      showSection: true,
+    });
   } catch (error) {
     // Forward database and unexpected errors to centralized error-handling middleware.
     return next(error);

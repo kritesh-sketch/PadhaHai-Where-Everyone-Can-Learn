@@ -1,19 +1,15 @@
 import mongoose from "mongoose";
-
-export const COURSE_STATUSES = Object.freeze([
-  "DRAFT",
-  "PUBLISHED",
-  "ARCHIVED",
-  "REJECTED",
-]);
-export const COURSE_LEVELS = Object.freeze([
-  "BEGINNER",
-  "INTERMEDIATE",
-  "ADVANCED",
-]);
+import {
+  COURSE_STATUSES,
+  COURSE_LEVELS,
+  COURSE_TYPES,
+  COURSE_VISIBILITIES,
+} from "./course.constants.js";
 
 const courseSchema = new mongoose.Schema(
   {
+    // 1. BASIC COURSE INFORMATION
+
     title: {
       type: String,
       required: true,
@@ -21,6 +17,22 @@ const courseSchema = new mongoose.Schema(
       minlength: 3,
       maxlength: 160,
     },
+
+    subtitle: {
+      type: String,
+      trim: true,
+      maxlength: 250,
+      default: "",
+    },
+
+    description: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 10,
+      maxlength: 10000,
+    },
+
     slug: {
       type: String,
       required: true,
@@ -29,65 +41,53 @@ const courseSchema = new mongoose.Schema(
       unique: true,
       match: /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
     },
-    description: {
-      type: String,
-      required: true,
-      trim: true,
-      minlength: 10,
-      maxlength: 10000,
-    },
+
     thumbnail: {
       type: String,
       trim: true,
       maxlength: 2048,
       default: "",
     },
+
+    // 2. COURSE OWNERSHIP & CLASSIFICATION
+
     instructor: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
       index: true,
     },
+
     category: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Category",
       default: null,
     },
+
     level: {
       type: String,
       enum: COURSE_LEVELS,
       default: "BEGINNER",
     },
+
     language: {
       type: String,
       trim: true,
       maxlength: 60,
       default: "English",
     },
-    status: {
-      type: String,
-      enum: COURSE_STATUSES,
-      default: "DRAFT",
-      index: true,
-    },
-
-    // Course Details
-    subtitle: {
-      type: String,
-      trim: true,
-      maxlength: 250,
-      default: "",
-    },
-
-    courseType: {
-      type: String,
-      enum: ["SELF_PACED", "LIVE", "BLENDED"],
-      default: "SELF_PACED",
-    },
 
     tags: {
       type: [String],
       default: [],
+    },
+
+    // 3. COURSE TYPE & LEARNING INFORMATION
+
+    courseType: {
+      type: String,
+      enum: COURSE_TYPES,
+      default: "SELF_PACED",
     },
 
     learningObjectives: {
@@ -110,7 +110,8 @@ const courseSchema = new mongoose.Schema(
       default: [],
     },
 
-    // Course Content Summary
+    // 4. COURSE CONTENT SUMMARY
+
     totalModules: {
       type: Number,
       default: 0,
@@ -129,7 +130,8 @@ const courseSchema = new mongoose.Schema(
       min: 0,
     },
 
-    // Enrollment Settings
+    // 5. ENROLLMENT SETTINGS
+
     enrollmentOpen: {
       type: Boolean,
       default: true,
@@ -145,20 +147,30 @@ const courseSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    // Visibility
+
+    // 6. COURSE VISIBILITY & FEATURED STATUS
+
     visibility: {
       type: String,
-      enum: ["PUBLIC", "UNLISTED", "PRIVATE"],
+      enum: COURSE_VISIBILITIES,
       default: "PUBLIC",
     },
 
-    // Featured Course
     isFeatured: {
       type: Boolean,
       default: false,
+      index: true,
     },
 
-    // Moderation
+    // 7. PUBLICATION & APPROVAL
+
+    status: {
+      type: String,
+      enum: COURSE_STATUSES,
+      default: "DRAFT",
+      index: true,
+    },
+
     reviewedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -182,7 +194,8 @@ const courseSchema = new mongoose.Schema(
       default: null,
     },
 
-    // Course Statistics
+    // 8. COURSE STATISTICS
+
     averageRating: {
       type: Number,
       default: 0,
@@ -201,9 +214,99 @@ const courseSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+
+    // 9. COURSE CLASSIFICATION
+
+    subcategories: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Category",
+      },
+    ],
+
+    // 10. COURSE DISCOVERY & SEARCH
+
+    searchKeywords: {
+      type: [String],
+      default: [],
+    },
+
+    // 11. ENROLLMENT STATISTICS
+
+    enrollmentCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    // 12. COURSE INTERACTION SETTINGS
+
+    allowDiscussions: {
+      type: Boolean,
+      default: true,
+    },
+
+    allowReviews: {
+      type: Boolean,
+      default: true,
+    },
+
+    // 13. COURSE DELETION & RECOVERY
+
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
+
+    deletedAt: {
+      type: Date,
+      default: null,
+    },
+
+    deletedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
-  { timestamps: true },
+  {
+    timestamps: true,
+  },
 );
+
+// DATABASE INDEXES
+// Public course listing and newest courses
+courseSchema.index({
+  status: 1,
+  visibility: 1,
+  isDeleted: 1,
+  createdAt: -1,
+});
+
+// Popular courses
+courseSchema.index({
+  status: 1,
+  enrollmentCount: -1,
+});
+
+// Top-rated courses
+courseSchema.index({
+  status: 1,
+  averageRating: -1,
+});
+
+// Instructor's courses by status
+courseSchema.index({
+  instructor: 1,
+  status: 1,
+});
+
+courseSchema.index({
+  status: 1,
+  visibility: 1,
+  isDeleted: 1,
+  enrollmentCount: -1,
+});
 
 const courseModel = mongoose.model("Course", courseSchema);
 

@@ -1,168 +1,25 @@
 import mongoose from "mongoose";
-import categoryModel from "../categories/category.model.js";
 import enrollmentModel from "../enrollments/enrollment.model.js";
 import courseModel, { COURSE_LEVELS, COURSE_STATUSES } from "./course.model.js";
+import {
+  CourseServiceError,
+  createCourse as createCourseService,
+  getAllCourses as getAllCoursesService,
+  getCourseById as getCourseByIdService,
+  getCourseBySlug as getCourseBySlugService,
+  getInstructorCourses as getInstructorCoursesService,
+  updateCourse as updateCourseService,
+} from "./course.service.js";
 
-/**
- * Converts a string into a URL-friendly slug.
- *
- * Normalizes the input to lowercase, replaces consecutive non-alphanumeric
- * characters with hyphens, and removes leading or trailing hyphens.
- *
- * @param {string} value - The string to convert into a slug.
- * @returns {string} The normalized, URL-friendly slug.
- */
-function createSlug(value) {
-  // Normalize the string to lowercase and replace non-alphanumeric sequences with hyphens.
-  return (
-    value
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      // Remove leading and trailing hyphens from the generated slug.
-      .replace(/^-|-$/g, "")
-  );
-}
-
-/**
- * Validates and parses course input data.
- *
- * Supports both full course creation and partial course updates.
- * Validates course fields, normalizes string values, generates a slug
- * from the course title when appropriate, and collects validation errors.
- *
- * @param {Object} body - The request body containing course data.
- * @param {boolean} [partial=false] - Whether to validate only the fields provided.
- * @returns {{ input: Object, errors: Array<{ field: string, message: string }> }} The validated course data and any validation errors.
- */
-function parseCourseInput(body, partial = false) {
-  const input = {};
-  const errors = [];
-
-  // Validate the title and description according to their length constraints.
-  for (const [field, options] of Object.entries({
-    title: { minimum: 3, maximum: 160 },
-    description: { minimum: 10, maximum: 10000 },
-  })) {
-    // Skip fields that are not provided during a partial update.
-    if (partial && body[field] === undefined) {
-      continue;
-    }
-
-    // Reject values that are not strings or fall outside the allowed length range.
-    if (
-      typeof body[field] !== "string" ||
-      body[field].trim().length < options.minimum ||
-      body[field].trim().length > options.maximum
-    ) {
-      errors.push({
-        field,
-        message: `Must be between ${options.minimum} and ${options.maximum} characters`,
-      });
-    } else {
-      // Store the validated string without leading or trailing whitespace.
-      input[field] = body[field].trim();
-    }
+function handleCourseServiceError(error, res, next) {
+  if (error instanceof CourseServiceError) {
+    return res.status(error.statusCode).json({
+      message: error.message,
+      ...(error.errors ? { errors: error.errors } : {}),
+    });
   }
 
-  // Validate the supplied slug or generate one from the course title when appropriate.
-  if (body.slug !== undefined || (!partial && input.title)) {
-    const slug = body.slug === undefined ? createSlug(input.title) : body.slug;
-
-    // Ensure the slug contains valid characters and does not exceed the maximum length.
-    if (typeof slug !== "string" || !createSlug(slug) || slug.length > 180) {
-      errors.push({
-        field: "slug",
-        message:
-          "Must contain 1 to 180 letters or numbers separated by hyphens",
-      });
-    } else {
-      // Normalize the slug before adding it to the validated input.
-      input.slug = createSlug(slug);
-    }
-  } else if (partial && input.title && body.slug === undefined) {
-    // Regenerate the slug when the title changes without an explicit slug.
-    input.slug = createSlug(input.title);
-  }
-
-  // Validate the optional thumbnail value and enforce its maximum length.
-  if (body.thumbnail !== undefined) {
-    if (
-      typeof body.thumbnail !== "string" ||
-      body.thumbnail.trim().length > 2048
-    ) {
-      errors.push({
-        field: "thumbnail",
-        message: "Must be a string of at most 2048 characters",
-      });
-    } else {
-      input.thumbnail = body.thumbnail.trim();
-    }
-  }
-
-  // Ensure the course level matches one of the supported values.
-  if (body.level !== undefined) {
-    if (!COURSE_LEVELS.includes(body.level)) {
-      errors.push({
-        field: "level",
-        message: `Must be one of: ${COURSE_LEVELS.join(", ")}`,
-      });
-    } else {
-      input.level = body.level;
-    }
-  }
-
-  // Validate the course language and normalize whitespace.
-  if (body.language !== undefined) {
-    if (
-      typeof body.language !== "string" ||
-      body.language.trim().length < 1 ||
-      body.language.trim().length > 60
-    ) {
-      errors.push({
-        field: "language",
-        message: "Must be between 1 and 60 characters",
-      });
-    } else {
-      input.language = body.language.trim();
-    }
-  }
-
-  // Preserve the existing category unless a category value is explicitly provided.
-  if (body.category === undefined) {
-    return { input, errors };
-  }
-
-  // Allow the category to be cleared by explicitly providing null or an empty string.
-  if (body.category === null || body.category === "") {
-    input.category = null;
-  } else if (
-    typeof body.category === "string" &&
-    mongoose.isValidObjectId(body.category)
-  ) {
-    // Store the validated category ID.
-    input.category = body.category;
-  } else {
-    // Reject category values that are not valid MongoDB ObjectId strings.
-    errors.push({ field: "category", message: "Must be a valid category ID" });
-  }
-
-  // Return the validated fields alongside any collected validation errors.
-  return { input, errors };
-}
-
-/**
- * Checks whether the specified course category exists.
- *
- * Treats an omitted category ID as valid and queries the database
- * to verify the existence of a category when an ID is provided.
- *
- * @param {string|null|undefined} categoryId - The ID of the category to validate.
- * @returns {Promise<boolean|Object>} True when no category is specified, or the matching category's existence result.
- */
-async function validateCategory(categoryId) {
-  // Accept courses without an assigned category.
-  // Otherwise, verify that the category exists in the database.
-  return !categoryId || (await categoryModel.exists({ _id: categoryId }));
+  return next(error);
 }
 
 /**
@@ -392,177 +249,158 @@ async function listCourses(req, res, next, options) {
 }
 
 /**
- * Retrieves a paginated list of published courses.
+ * Creates a course for the authenticated instructor.
  *
- * Delegates query validation, filtering, sorting, and pagination
- * to the shared course listing handler while restricting results
- * to courses with a published status.
+ * @param {Object} req - The request containing the instructor and course body.
+ * @param {Object} res - The response object.
+ * @param {Function} next - The centralized error middleware callback.
+ * @returns {Promise<Object|void>} The created course response.
+ */
+export async function createCourse(req, res, next) {
+  try {
+    const course = await createCourseService(req.user?._id, req.body ?? {});
+    return res.status(201).json({ course });
+  } catch (error) {
+    return handleCourseServiceError(error, res, next);
+  }
+}
+
+/**
+ * Updates a course using only the authenticated instructor's permitted fields.
+ *
+ * @param {Object} req - The request containing course ID, instructor, and updates.
+ * @param {Object} res - The response object.
+ * @param {Function} next - The centralized error middleware callback.
+ * @returns {Promise<Object|void>} The updated course response.
+ */
+export async function updateCourse(req, res, next) {
+  try {
+    const course = await updateCourseService(
+      req.params.courseId,
+      req.user?._id,
+      req.body ?? {},
+    );
+    return res.json({ course });
+  } catch (error) {
+    return handleCourseServiceError(error, res, next);
+  }
+}
+
+/**
+ * Retrieves a course by ID after applying service-level access rules.
+ *
+ * @param {Object} req - The request containing the course ID and optional viewer.
+ * @param {Object} res - The response object.
+ * @param {Function} next - The centralized error middleware callback.
+ * @returns {Promise<Object|void>} The requested course response.
+ */
+export async function getCourseById(req, res, next) {
+  try {
+    const course = await getCourseByIdService(
+      req.params.courseId,
+      req.user ?? null,
+    );
+    return res.json({ course });
+  } catch (error) {
+    return handleCourseServiceError(error, res, next);
+  }
+}
+
+/**
+ * Retrieves a course by slug after applying service-level access rules.
+ *
+ * @param {Object} req - The request containing the course slug and optional viewer.
+ * @param {Object} res - The response object.
+ * @param {Function} next - The centralized error middleware callback.
+ * @returns {Promise<Object|void>} The requested course response.
+ */
+export async function getCourseBySlug(req, res, next) {
+  try {
+    const course = await getCourseBySlugService(
+      req.params.slug,
+      req.user ?? null,
+    );
+    return res.json({ course });
+  } catch (error) {
+    return handleCourseServiceError(error, res, next);
+  }
+}
+
+/**
+ * Returns the public course catalog and its pagination metadata.
+ *
+ * @param {Object} req - The request containing catalog query parameters.
+ * @param {Object} res - The response object.
+ * @param {Function} next - The centralized error middleware callback.
+ * @returns {Promise<Object|void>} The public course list response.
+ */
+export async function getAllCourses(req, res, next) {
+  try {
+    const result = await getAllCoursesService(req.query ?? {});
+    return res.json(result);
+  } catch (error) {
+    return handleCourseServiceError(error, res, next);
+  }
+}
+
+/**
+ * Returns courses owned by the authenticated instructor.
+ *
+ * @param {Object} req - The request containing instructor and listing filters.
+ * @param {Object} res - The response object.
+ * @param {Function} next - The centralized error middleware callback.
+ * @returns {Promise<Object|void>} The instructor course list response.
+ */
+export async function getInstructorCourses(req, res, next) {
+  try {
+    const result = await getInstructorCoursesService(
+      req.user?._id,
+      req.query ?? {},
+    );
+    return res.json(result);
+  } catch (error) {
+    return handleCourseServiceError(error, res, next);
+  }
+}
+
+/**
+ * Retrieves the learner-facing public course catalog.
  *
  * @param {Object} req - The request object containing course listing query parameters.
  * @param {Object} res - The response object used to return the published courses.
  * @param {Function} next - The middleware function for forwarding unhandled errors.
- * @returns {Promise<Object|void>} The paginated list of published courses or the result of error forwarding.
+ * @returns {Promise<Object|void>} The public course list or the result of error forwarding.
  */
 export async function listPublishedCourses(req, res, next) {
-  // Restrict the course listing to published courses.
-  return listCourses(req, res, next, { statuses: ["PUBLISHED"] });
+  return getAllCourses(req, res, next);
 }
 
 /**
- * Retrieves a published course by its ID.
- *
- * Validates the course ID, fetches the matching published course with
- * its category and instructor details, and returns the course record.
- * Returns an appropriate error response when the ID is invalid or
- * the published course cannot be found.
+ * Retrieves a course by ID using the service's visibility rules.
  *
  * @param {Object} req - The request object containing the course ID.
  * @param {Object} res - The response object used to return the course or an error response.
  * @param {Function} next - The middleware function for forwarding unhandled errors.
- * @returns {Promise<Object|void>} The published course or the result of error forwarding.
+ * @returns {Promise<Object|void>} The accessible course or the result of error forwarding.
  */
 export async function getPublishedCourse(req, res, next) {
-  // Reject requests containing an invalid MongoDB ObjectId.
-  if (!mongoose.isValidObjectId(req.params.courseId)) {
-    return res.status(400).json({ message: "Course ID is invalid" });
-  }
-
-  try {
-    // Retrieve the published course with its category and instructor details.
-    const course = await courseModel
-      .findOne({ _id: req.params.courseId, status: "PUBLISHED" })
-      .populate("category", "name slug")
-      .populate("instructor", "firstName lastName username")
-      .lean();
-
-    // Return a not-found response when no published course matches the ID.
-    if (!course) {
-      return res.status(404).json({ message: "Course not found" });
-    }
-
-    // Return the published course details.
-    return res.json({ course });
-  } catch (error) {
-    // Forward database and unexpected errors to centralized error-handling middleware.
-    return next(error);
-  }
+  return getCourseById(req, res, next);
 }
 
 /**
- * Retrieves a paginated list of courses created by the authenticated instructor.
- *
- * Validates the listing query parameters, restricts results to courses
- * owned by the authenticated instructor, and supports filtering, sorting,
- * and pagination. Returns the matching courses with category details
- * and pagination metadata.
+ * Compatibility handler for the instructor course listing route.
  *
  * @param {Object} req - The request object containing the authenticated instructor and query parameters.
  * @param {Object} res - The response object used to return the course list or validation errors.
  * @param {Function} next - The middleware function for forwarding unhandled errors.
- * @returns {Promise<Object|void>} The paginated instructor course list or the result of error forwarding.
+ * @returns {Promise<Object|void>} The instructor course list or the result of error forwarding.
  */
 export async function listInstructorCourses(req, res, next) {
-  // Validate query parameters and allow the supported course statuses.
-  const parsed = parseCourseListQuery(req, { statuses: COURSE_STATUSES });
-
-  // Reject the request if any listing parameter fails validation.
-  if (parsed.errors.length) {
-    return res
-      .status(400)
-      .json({ message: "Validation failed", errors: parsed.errors });
-  }
-
-  // Restrict results to courses owned by the authenticated instructor.
-  const query = {
-    $and: [parsed.query, { instructor: req.user._id }],
-  };
-
-  try {
-    // Retrieve the instructor's courses with category details, sorting, and pagination.
-    const [courses, total] = await Promise.all([
-      courseModel
-        .find(query)
-        .populate("category", "name slug")
-        .sort(parsed.sort)
-        .skip((parsed.page - 1) * parsed.limit)
-        .limit(parsed.limit)
-        .lean(),
-      courseModel.countDocuments(query),
-    ]);
-
-    // Return the matching courses and pagination metadata.
-    return res.json({
-      courses,
-      pagination: {
-        page: parsed.page,
-        limit: parsed.limit,
-        total,
-        totalPages: Math.ceil(total / parsed.limit),
-      },
-    });
-  } catch (error) {
-    // Forward database and unexpected errors to centralized error-handling middleware.
-    return next(error);
-  }
+  return getInstructorCourses(req, res, next);
 }
 
 /**
- * Creates a new course for the authenticated instructor.
- *
- * Validates the submitted course data, verifies that the specified category
- * exists, and creates the course with an initial draft status. Handles
- * duplicate course slugs and forwards unexpected errors to error middleware.
- *
- * @param {Object} req - The request object containing the authenticated instructor and course data.
- * @param {Object} res - The response object used to return the created course or an error response.
- * @param {Function} next - The middleware function for forwarding unhandled errors.
- * @returns {Promise<Object|void>} The created course or the result of error forwarding.
- */
-export async function createCourse(req, res, next) {
-  // Validate and normalize the submitted course data.
-  const { input, errors } = parseCourseInput(req.body ?? {});
-
-  // Reject the request when course data fails validation.
-  if (errors.length > 0) {
-    return res.status(400).json({ message: "Validation failed", errors });
-  }
-
-  try {
-    // Verify that the specified category exists before creating the course.
-    if (!(await validateCategory(input.category))) {
-      return res.status(400).json({
-        message: "Validation failed",
-        errors: [{ field: "category", message: "Category does not exist" }],
-      });
-    }
-
-    // Create the course under the authenticated instructor with draft status.
-    const course = await courseModel.create({
-      ...input,
-      instructor: req.user._id,
-      status: "DRAFT",
-    });
-
-    // Return the newly created course with HTTP 201 Created.
-    return res.status(201).json({ course });
-  } catch (error) {
-    // Return a conflict response when the course slug violates a unique constraint.
-    if (error.code === 11000) {
-      return res.status(409).json({ message: "Course slug already exists" });
-    }
-
-    // Forward unexpected database and application errors to centralized error-handling middleware.
-    return next(error);
-  }
-}
-
-/**
- * Updates a course owned by the authenticated instructor.
- *
- * Validates the course ID and submitted fields, verifies the category
- * when it is updated, and applies the changes to the matching course.
- * Resets the course status to draft after an update and handles
- * duplicate slugs and missing courses.
+ * Compatibility handler for the instructor course update route.
  *
  * @param {Object} req - The request object containing the authenticated instructor, course ID, and update data.
  * @param {Object} res - The response object used to return the updated course or an error response.
@@ -570,60 +408,7 @@ export async function createCourse(req, res, next) {
  * @returns {Promise<Object|void>} The updated course or the result of error forwarding.
  */
 export async function updateInstructorCourse(req, res, next) {
-  // Reject requests containing an invalid MongoDB ObjectId.
-  if (!mongoose.isValidObjectId(req.params.courseId)) {
-    return res.status(400).json({ message: "Course ID is invalid" });
-  }
-
-  // Validate and normalize the supplied fields for a partial course update.
-  const { input, errors } = parseCourseInput(req.body ?? {}, true);
-
-  // Reject invalid input or requests that do not provide any fields to update.
-  if (errors.length > 0 || Object.keys(input).length === 0) {
-    return res.status(400).json({
-      message: "Validation failed",
-      errors:
-        errors.length > 0
-          ? errors
-          : [{ field: "body", message: "Provide at least one course field" }],
-    });
-  }
-
-  try {
-    // Verify that the specified category exists when the category field is updated.
-    if (
-      Object.hasOwn(input, "category") &&
-      !(await validateCategory(input.category))
-    ) {
-      return res.status(400).json({
-        message: "Validation failed",
-        errors: [{ field: "category", message: "Category does not exist" }],
-      });
-    }
-
-    // Update only the instructor's course and reset its status to draft.
-    const course = await courseModel.findOneAndUpdate(
-      { _id: req.params.courseId, instructor: req.user._id },
-      { $set: { ...input, status: "DRAFT" } },
-      { new: true, runValidators: true },
-    );
-
-    // Return a not-found response if the course does not exist or is not owned by the instructor.
-    if (!course) {
-      return res.status(404).json({ message: "Course not found" });
-    }
-
-    // Return the updated course record.
-    return res.json({ course });
-  } catch (error) {
-    // Return a conflict response when the updated slug violates a unique constraint.
-    if (error.code === 11000) {
-      return res.status(409).json({ message: "Course slug already exists" });
-    }
-
-    // Forward unexpected database and application errors to centralized error-handling middleware.
-    return next(error);
-  }
+  return updateCourse(req, res, next);
 }
 
 /**

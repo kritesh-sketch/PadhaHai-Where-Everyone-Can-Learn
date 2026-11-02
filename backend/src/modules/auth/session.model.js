@@ -16,6 +16,11 @@ const sessionSchema = new mongoose.Schema(
       required: [true, "User is required"],
     },
 
+    rememberMe: {
+      type: Boolean,
+      default: false,
+    },
+
     // Stores the hashed refresh token for verification without retaining
     // the original token in the database.
     refreshTokenHash: {
