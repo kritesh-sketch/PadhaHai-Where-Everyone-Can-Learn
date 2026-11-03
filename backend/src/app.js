@@ -2,6 +2,7 @@ import cookieParser from "cookie-parser";
 import express from "express";
 
 import authRouter from "./routes/auth.routes.js";
+import enrollmentRouter from "./modules/enrollments/enrollment.route.js";
 import adminRouter from "./routes/admin.routes.js";
 import catalogRouter from "./routes/catalog.routes.js";
 import instructorRouter from "./routes/instructor.routes.js";
@@ -20,6 +21,7 @@ app.use(cookieParser());
 
 app.use("/api/home", homeRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/enrollments", enrollmentRouter);
 app.use("/api/users", userRouter);
 app.use("/api/progress", progressRouter);
 app.use("/api/learner", studentRouter);
